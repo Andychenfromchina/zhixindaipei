@@ -14,6 +14,8 @@ from typing import Optional
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from match_engine import analyze_credit_report, match_products
 
@@ -35,15 +37,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-def load_products() -> pd.DataFrame:
-    if not CSV_PATH.exists():
-        raise HTTPException(503, f"产品数据库不存在: {CSV_PATH}")
-    return pd.read_csv(CSV_PATH, encoding="utf-8-sig")
-
+# 挂载静态文件（前端构建输出）
+static_path = Path(__file__).parent.parent / "static"
+if static_path.exists():
+    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 @app.get("/", tags=["健康检查"])
 def root():
+    # 如果静态文件存在，返回首页
+    index_path = static_path / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    # 否则返回 API 状态
     return {
         "status": "ok",
         "service": "智信贷配 API v2.0",
