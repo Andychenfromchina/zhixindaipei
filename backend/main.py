@@ -24,6 +24,21 @@ log = logging.getLogger(__name__)
 
 CSV_PATH = Path(__file__).parent / "loan_products.csv"
 
+
+def load_products():
+    """加载贷款产品 CSV 数据"""
+    if not CSV_PATH.exists():
+        log.warning(f"CSV file not found: {CSV_PATH}")
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(CSV_PATH, encoding="utf-8")
+        log.info(f"Loaded {len(df)} products from {CSV_PATH}")
+        return df
+    except Exception as e:
+        log.error(f"Failed to load CSV: {e}")
+        return pd.DataFrame()
+
+
 app = FastAPI(
     title="智信贷配 API",
     description="银行贷款产品数据库 + 征信分析匹配引擎",
