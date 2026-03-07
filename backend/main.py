@@ -1,139 +1,133 @@
-"""
-智信贷配 FastAPI 后端
-启动：uvicorn main:app --reload --port 8000
-"""
-
-import io
 import json
-import logging
-import re
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
+import os
 
-import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-
-from match_engine import analyze_credit_report, match_products
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger(__name__)
-
-CSV_PATH = Path(__file__).parent / "loan_products.csv"
-
-
-def load_products():
-    """加载贷款产品 CSV 数据"""
-    if not CSV_PATH.exists():
-        log.warning(f"CSV file not found: {CSV_PATH}")
-        return pd.DataFrame()
+# 加载产品数据（不使用 pandas，直接解析 CSV）
+def load_products_simple():
+    """简单加载 CSV 数据"""
+    csv_path = os.path.join(os.path.dirname(__file__), "loan_products.csv")
+    products = []
+    
     try:
-        df = pd.read_csv(CSV_PATH, encoding="utf-8")
-        log.info(f"Loaded {len(df)} products from {CSV_PATH}")
-        return df
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            if len(lines) < 2:
+                return products
+            
+            # 解析表头
+            headers = lines[0].strip().split(',')
+            
+            # 解析数据行
+            for line in lines[1:101]:  # 最多100条
+                values = line.strip().split(',')
+                if len(values) >= len(headers):
+                    product = {}
+                    for i, header in enumerate(headers):
+                        product[header] = values[i] if i < len(values) else ""
+                    products.append(product)
     except Exception as e:
-        log.error(f"Failed to load CSV: {e}")
-        return pd.DataFrame()
+        print(f"Error loading CSV: {e}")
+    
+    return products
 
+# ============ 阿里云 FC 入口 ============
 
-app = FastAPI(
-    title="智信贷配 API",
-    description="银行贷款产品数据库 + 征信分析匹配引擎",
-    version="2.0.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # 生产环境改为具体域名
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 挂载静态文件（前端构建输出）
-static_path = Path(__file__).parent.parent / "static"
-if static_path.exists():
-    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-
-@app.get("/", tags=["健康检查"])
-def root():
-    # 如果静态文件存在，返回首页
-    index_path = static_path / "index.html"
-    if index_path.exists():
-        return FileResponse(str(index_path))
-    # 否则返回 API 状态
-    return {
-        "status": "ok",
-        "service": "智信贷配 API v2.0",
-        "time": datetime.now().isoformat(),
-        "products_loaded": len(load_products()),
-    }
-
-
-@app.post("/analyze", tags=["核心分析"])
-async def analyze(file: UploadFile = File(...)):
+def handler(event, context):
     """
-    上传征信报告（JSON / PDF / TXT），返回：
-    - credit_health_score: 信用健康分 (0-100)
-    - risk_level: 风险等级
-    - detailed_explanation: 详细解读
-    - matches: 匹配产品列表（含 match_score 和 max_amount，均来自真实计算）
+    阿里云函数计算 HTTP 触发器入口
     """
-    raw = await file.read()
-
-    # PDF 提取文字
-    if file.filename and file.filename.lower().endswith(".pdf"):
-        try:
-            from pdfminer.high_level import extract_text
-            content = extract_text(io.BytesIO(raw))
-        except ImportError:
-            content = raw.decode("utf-8", errors="ignore")
-    else:
-        content = raw.decode("utf-8", errors="ignore")
-
-    # 解析征信 + 计算信用分
-    features = analyze_credit_report(content)
-    score = features["credit_health_score"]
-    level = features["risk_level"]
-    explanation = features["detailed_explanation"]
-
-    # 匹配产品
-    df = load_products()
-    matches = match_products(features, df)
-
-    return {
-        "credit_health_score": score,
-        "risk_level": level,
-        "detailed_explanation": explanation,
-        "matches": matches,
+    # CORS 响应头 - 必须包含，否则前端无法访问
+    cors_headers = {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept",
+        "Access-Control-Max-Age": "86400"
     }
+    
+    try:
+        # 解析 event（FC 3.0 传入的可能是 bytes 或 JSON 字符串）
+        if isinstance(event, bytes):
+            event = json.loads(event.decode('utf-8'))
+        elif isinstance(event, str):
+            event = json.loads(event)
+        
+        # 获取请求信息
+        http_method = event.get("httpMethod", "GET") if isinstance(event, dict) else "GET"
+        path = event.get("path", "/") if isinstance(event, dict) else "/"
+        query = event.get("queryParameters") or {} if isinstance(event, dict) else {}
+        
+        print(f"Request: {http_method} {path}")
+        
+        # 处理 OPTIONS 预检请求
+        if http_method == "OPTIONS":
+            return {
+                "statusCode": 200,
+                "headers": cors_headers,
+                "body": json.dumps({"message": "CORS OK"})
+            }
+        
+        # 健康检查
+        if path == "/" or path == "/health":
+            return {
+                "statusCode": 200,
+                "headers": cors_headers,
+                "body": json.dumps({
+                    "status": "ok",
+                    "service": "智信贷配 API",
+                    "version": "2.0.0",
+                    "timestamp": "2024"
+                })
+            }
+        
+        # 产品列表
+        if path == "/products":
+            products = load_products_simple()
+            return {
+                "statusCode": 200,
+                "headers": cors_headers,
+                "body": json.dumps(products, ensure_ascii=False)
+            }
+        
+        # 数据库统计
+        if path == "/products/stats":
+            products = load_products_simple()
+            return {
+                "statusCode": 200,
+                "headers": cors_headers,
+                "body": json.dumps({
+                    "total_products": len(products),
+                    "status": "ok"
+                }, ensure_ascii=False)
+            }
+        
+        # 默认响应
+        return {
+            "statusCode": 200,
+            "headers": cors_headers,
+            "body": json.dumps({
+                "path": path,
+                "method": http_method,
+                "message": "智信贷配 API 运行中",
+                "endpoints": ["/health", "/products", "/products/stats"]
+            }, ensure_ascii=False)
+        }
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"Error: {error_msg}")
+        return {
+            "statusCode": 500,
+            "headers": cors_headers,
+            "body": json.dumps({
+                "error": str(e),
+                "type": type(e).__name__
+            }, ensure_ascii=False)
+        }
 
-
-@app.get("/products", tags=["产品数据库"])
-def get_products(
-    institution_type: Optional[str] = None,
-    loan_type: Optional[str] = None,
-    limit: int = 50,
-):
-    """查询产品库，支持按机构类型/贷款类型筛选"""
-    df = load_products()
-    if institution_type:
-        df = df[df["机构类型"] == institution_type]
-    if loan_type:
-        df = df[df["贷款类型"] == loan_type]
-    return df.head(limit).to_dict(orient="records")
-
-
-@app.get("/products/stats", tags=["产品数据库"])
-def get_stats():
-    """数据库统计信息"""
-    df = load_products()
-    return {
-        "total_products": len(df),
-        "institutions": int(df["机构名称"].nunique()),
-        "institution_types": df["机构类型"].value_counts().to_dict(),
-        "loan_types": df["贷款类型"].value_counts().to_dict(),
-        "last_updated": df["更新日期"].max() if "更新日期" in df.columns else None,
-    }
+# 本地测试
+if __name__ == "__main__":
+    # 模拟测试
+    test_event = {"httpMethod": "GET", "path": "/health", "queryParameters": {}}
+    result = handler(test_event, None)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
